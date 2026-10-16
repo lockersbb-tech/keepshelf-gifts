@@ -44,6 +44,10 @@
   input { font: inherit; flex: 1; min-width: 140px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border);
     background: var(--bg); color: var(--text); }
   .msg { text-align: center; color: var(--muted); padding: 60px 10px; }
+  .pool { background: var(--chip); border-radius: 12px; padding: 10px 12px; display: grid; gap: 6px; }
+  .poolLine { margin: 0; font-size: 14.5px; }
+  .bar { height: 8px; border-radius: 99px; background: var(--border); overflow: hidden; }
+  .barFill { height: 8px; background: var(--done); border-radius: 99px; }
   footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 28px; }
 </style>
 </head>
@@ -119,10 +123,58 @@ async function unclaim(key) {
   load();
 }
 
+const pledgeKey = (id) => `keepshelf-pledge:${listId}:${id}`;
+const fmt = (n) => Number(n).toLocaleString(undefined, { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 });
+
+async function pledge(key, name, amount) {
+  const value = Number(String(amount).replace(/[^0-9.]/g, ''));
+  if (!(value > 0)) { alert('Please enter an amount.'); return; }
+  try {
+    const res = await rpc('pledge_gift', { p_id: listId, p_item: key, p_name: name.trim(), p_amount: value });
+    if (res && res.token) localStorage.setItem(pledgeKey(res.id), res.token);
+  } catch { alert('Couldn’t save that — please try again.'); }
+  openForm = null;
+  load();
+}
+
+async function unpledge(id) {
+  const token = localStorage.getItem(pledgeKey(id));
+  if (!token) return;
+  try {
+    await rpc('unpledge_gift', { p_id: listId, p_pledge: id, p_token: token });
+    localStorage.removeItem(pledgeKey(id));
+  } catch { alert('Couldn’t undo that — please try again.'); }
+  load();
+}
+
+// "Chip in" pool: everyone's pledges towards one gift, against its cheapest price when known.
+function poolArea(item, claimed) {
+  const pledges = (list.pledges || {})[item.key] || [];
+  const target = (item.buy || []).map((b) => b.price).find((p) => typeof p === 'number');
+  const raised = pledges.reduce((sum, p) => sum + Number(p.amount), 0);
+  if (pledges.length === 0 && (claimed || openForm !== `pool:${item.key}`)) return null;
+  const funded = target && raised >= target;
+  const names = pledges.map((p) => `${p.name || 'Someone'} ${fmt(p.amount)}`).join(', ');
+  const mine = pledges.filter((p) => localStorage.getItem(pledgeKey(p.id)));
+  const pct = target ? Math.min(100, Math.round((raised / target) * 100)) : 0;
+  return el('div', { class: 'pool' },
+    pledges.length > 0 && el('p', { class: 'poolLine' },
+      funded ? '🎉 Fully funded! ' : '💰 Chipping in: ',
+      el('b', {}, target ? `${fmt(raised)} of ${fmt(target)}` : `${fmt(raised)} so far`)),
+    target && pledges.length > 0 && el('div', { class: 'bar' }, el('div', { class: 'barFill', style: `width:${pct}%` })),
+    names && el('p', { class: 'meta' }, names),
+    ...mine.map((p) => el('div', { class: 'claim' },
+      el('span', { class: 'done' }, `✓ You chipped in ${fmt(p.amount)}`),
+      el('button', { class: 'ghost', onclick: () => unpledge(p.id) }, 'Undo'))));
+}
+
 function itemCard(item) {
   const claimedBy = list.claims[item.key];
   const claimed = claimedBy !== undefined;
   const mine = claimed && localStorage.getItem(claimKey(item.key));
+  const pledges = (list.pledges || {})[item.key] || [];
+  const target = (item.buy || []).map((b) => b.price).find((p) => typeof p === 'number');
+  const funded = target && pledges.reduce((s, p) => s + Number(p.amount), 0) >= target;
   const emojiBox = () => el('div', { class: 'emoji', 'aria-hidden': 'true' }, item.emoji || '🎁');
   const image = safeUrl(item.imageUrl)
     ? el('img', { class: 'pic', src: item.imageUrl, alt: '', loading: 'lazy',
@@ -144,10 +196,22 @@ function itemCard(item) {
       input, el('button', { class: 'get', type: 'submit', style: 'width:auto' }, 'Confirm'),
       el('button', { class: 'ghost', type: 'button', onclick: () => { openForm = null; render(); } }, 'Cancel'));
     setTimeout(() => input.focus(), 0);
+  } else if (openForm === `pool:${item.key}`) {
+    const amount = el('input', { placeholder: 'Amount', inputmode: 'decimal', maxlength: '9', 'aria-label': 'Amount', style: 'max-width:110px' });
+    const name = el('input', { placeholder: 'Your name (optional)', maxlength: '40', 'aria-label': 'Your name' });
+    claimArea = el('form', { class: 'claim', onsubmit: (e) => { e.preventDefault(); pledge(item.key, name.value, amount.value); } },
+      amount, name, el('button', { class: 'get', type: 'submit', style: 'width:auto' }, 'Chip in'),
+      el('button', { class: 'ghost', type: 'button', onclick: () => { openForm = null; render(); } }, 'Cancel'));
+    setTimeout(() => amount.focus(), 0);
+  } else if (funded) {
+    claimArea = null;
   } else {
     claimArea = el('div', { class: 'claim' },
-      el('button', { class: 'get', onclick: () => { openForm = item.key; render(); } }, '🎁 I’ll get this'));
+      pledges.length === 0 && el('button', { class: 'get', style: 'flex:2', onclick: () => { openForm = item.key; render(); } }, '🎁 I’ll get this'),
+      el('button', { class: pledges.length ? 'get' : 'ghost', style: 'flex:1;padding:11px 14px', onclick: () => { openForm = `pool:${item.key}`; render(); } },
+        pledges.length ? '💰 Chip in too' : '💰 Chip in'));
   }
+  const pool = poolArea(item, claimed);
 
   return el('article', { class: `item${claimed && !mine ? ' claimed' : ''}` },
     image,
@@ -157,19 +221,26 @@ function itemCard(item) {
       el('p', { class: 'meta' }, [item.type, item.maker].filter(Boolean).join(' · ')),
       item.note && el('p', { class: 'note' }, `“${item.note}”`),
       buy.length > 0 && el('div', { class: 'buy' }, ...buy)),
+    pool && el('div', { style: 'grid-column:1/-1' }, pool),
     claimArea);
 }
 
 function render() {
   document.title = list.title;
-  const items = [...list.items].sort((a, b) =>
-    (list.claims[a.key] !== undefined) - (list.claims[b.key] !== undefined));
-  const left = items.filter((i) => list.claims[i.key] === undefined).length;
+  // Taken = someone's buying it, or the chip-in pool has reached its price.
+  const taken = (i) => {
+    if (list.claims[i.key] !== undefined) return true;
+    const target = (i.buy || []).map((b) => b.price).find((p) => typeof p === 'number');
+    const raised = ((list.pledges || {})[i.key] || []).reduce((s, p) => s + Number(p.amount), 0);
+    return !!target && raised >= target;
+  };
+  const items = [...list.items].sort((a, b) => taken(a) - taken(b));
+  const left = items.filter((i) => !taken(i)).length;
   app.replaceChildren(
     el('h1', {}, `${OCCASION_EMOJI[list.occasion] || '🎁'} ${list.title}`),
     el('p', { class: 'sub' }, `${items.length} ${items.length === 1 ? 'idea' : 'ideas'} · ${left} still up for grabs`),
     el('div', { class: 'shh' },
-      'Tap “I’ll get this” on anything you’re buying, so nobody doubles up. ',
+      'Tap “I’ll get this” on anything you’re buying, or “Chip in” to share a bigger gift with others — so nobody doubles up. ',
       list.from_name ? `${list.from_name} won’t see who’s getting what in the app — shh! 🤫` : 'The person who made the list won’t see it in the app — shh! 🤫'),
     ...items.map(itemCard),
     el('footer', {}, 'Made with Keepshelf'));
